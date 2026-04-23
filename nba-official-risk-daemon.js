@@ -186,6 +186,18 @@ function collapseAtSpacing(s) {
   return t.replace(/\b([A-Z]{2,3})\s*@\s*([A-Z]{2,3})\b/g, "$1@$2");
 }
 
+/** 同一场的 away@home 与 home@away 视为同一对（用于跳过 PDF 分页处重复的 Matchup 标题）。 */
+function isSameMatchupPair(away, home, a, b) {
+  return (a === away && b === home) || (a === home && b === away);
+}
+
+/** 如 "LAL@HOU" 与 (away,home) 是否同一对阵。 */
+function isMatchupTokenForGame(tok, away, home) {
+  const p = String(tok || "").match(/^([A-Z]{2,3})@([A-Z]{2,3})$/i);
+  if (!p) return false;
+  return isSameMatchupPair(away, home, p[1].toUpperCase(), p[2].toUpperCase());
+}
+
 function extractMatchupSection(full, teamA, teamB) {
   const p1 = `${canonicalAbbr(teamA)}@${canonicalAbbr(teamB)}`;
   const p2 = `${canonicalAbbr(teamB)}@${canonicalAbbr(teamA)}`;
@@ -199,19 +211,29 @@ function extractMatchupSection(full, teamA, teamB) {
   const rest = full.slice(idx);
   const re = /\b([A-Z]{2,3})@([A-Z]{2,3})\b/g;
   let m;
-  let n = 0;
   let cut = rest.length;
+  let seenHeader = false;
   while ((m = re.exec(rest)) !== null) {
-    n += 1;
-    if (n === 2) {
-      cut = m.index;
-      break;
+    if (!seenHeader) {
+      seenHeader = true;
+      continue;
     }
+    if (isSameMatchupPair(away, home, m[1], m[2])) {
+      // 同一场在下一页再印一次 "LAL@HOU" 时不能截断，否则会丢掉客队名单（如火箭在 Page2）。
+      continue;
+    }
+    cut = m.index;
+    break;
   }
-  if (n < 2) {
-    const endRe = /\d{1,2}:\d{2}\s+\(ET\)\s+[A-Z]{2,3}@[A-Z]{2,3}/;
-    const em = endRe.exec(rest);
-    if (em && em.index > 0) cut = Math.min(cut, em.index);
+  if (cut === rest.length) {
+    const timeRe = /\d{1,2}:\d{2}\s+\(ET\)\s+([A-Z]{2,3}@[A-Z]{2,3})/g;
+    let tlm;
+    while ((tlm = timeRe.exec(rest)) !== null) {
+      if (!isMatchupTokenForGame(tlm[1], away, home)) {
+        cut = tlm.index;
+        break;
+      }
+    }
   }
   return { away, home, section: rest.slice(0, cut).replace(/\s+/g, " ").trim() };
 }
@@ -243,7 +265,7 @@ function stripGluedReasonTailFromPlayerName(raw) {
     .replace(/\s+/g, " ")
     .trim();
   const phrase =
-    /^(?:Injury\/Illness|Injury\s*\/\s*Illness|G\s+League|League\s*-\s*Two\s*-\s*Way|League\s*-\s*Two-\s*Way|Two-\s*Way|Not\s+With\s+Team)\s+/i;
+    /^(?:Injury\/Illness|Injury\s*\/\s*Illness|Injury\s+Maintenance|G\s+League|League\s*-\s*Two\s*-\s*Way|League\s*-\s*Two-\s*Way|Two-\s*Way|Not\s+With\s+Team)\s+/i;
   const word =
     /^(?:Soreness|Surgery|Rest|Contusion|Contusions|Sprain|Strain|Tightness|Tightening|Management|Recovery|Repair|Post|Bursitis|Fracture|Tear|Tendon|Tendinitis|Tendonopathy|Impingement|Spasm|Spasms|Illness|Questionable|Probable|Doubtful|Available|Internal|External|Bilateral|Maintenance|Mask|Splint)\s+/i;
   for (let i = 0; i < 14; i += 1) {
@@ -602,7 +624,7 @@ function formatDiscordBody(item) {
     `状态：${item.statusText}`,
     `队伍：${item.teamAbbr} vs ${item.opponentAbbr}`,
     `报告时间：${fmtBj(item.reportTimeSec)}（北京）`,
-    `通知时赔率（该队）：${odds}`,
+    `通知时赔率（${item.teamAbbr}）：${odds}`,
     `链接：${item.polySportsUrl}`,
   ].join("\n");
 }
@@ -695,8 +717,23 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error("[nba-risk-daemon] fatal:", e?.message || e);
-  process.exit(1);
-});
-
+if (require.main === module) {
+  main().catch((e) => {
+    console.error("[nba-risk-daemon] fatal:", e?.message || e);
+    process.exit(1);
+  });
+} else {
+  module.exports = {
+    extractPdfText,
+    parseBundleFromPdfText,
+    diffNewOut,
+    fetchWatchedEvents,
+    buildRiskFeedItem,
+    sendDiscord,
+    pushRiskFeedItemRemote,
+    formatDiscordBody,
+    fetchOddsCentsForTeam,
+    markerId,
+    canonicalAbbr,
+  };
+}
