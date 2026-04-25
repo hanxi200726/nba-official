@@ -1,0 +1,14 @@
+{
+	"name": "nba-official",
+	"private": true,
+	"scripts": {
+		"nba-risk": "node nba-official-risk-daemon.js",
+		"shams": "node shams-injury-daemon.js"
+	},
+	"dependencies": {
+		"axios": "^1.15.2",
+		"dotenv": "^17.2.3",
+		"rss-parser": "^3.13.0",
+		"undici": "^7.16.0"
+	}
+}
