@@ -1,10 +1,10 @@
 /**
- * Shams Charania 推文监控（Nitter RSS）→ 伤病关键词过滤 → Polymarket 赔率 → Discord
+ * Shams Charania 推文监控（RSSHub / Nitter 等多源 RSS）→ 伤病关键词过滤 → Polymarket 赔率 → Discord
  *
  * Nitter 说明（请阅读，避免在 VPS 上踩坑）：
  * - 公共 Nitter 实例时好时坏；某个实例的「关于页」可能要求浏览器开 JavaScript（如 Anubis 反爬），
  *   与「RSS 直链 /feed」是否可用不是同一件事——以本脚本实际能否拉到 XML 为准，失败时换实例或
- *   设环境变量 SHAMS_RSS_URLS 指向你可用的 /username/rss 地址。
+ *   设环境变量 SHAMS_RSS_URLS 可完全覆盖下面默认的「多源」列表；不设则走 RSSHub + 多 Nitter 镜像。
  * - 项目主页：https://github.com/zedeus/nitter — 自架实例需配 Redis、且当前从 Twitter
  *   拉取需按文档配置 session 等，运维成本高于本脚本；多数用户用公共实例 RSS 即可。
  * - 冷启动会标记当前 feed 中条目为已读且不推 Discord；另用「启动后 bootAt 时间 + 条目 pubDate」
@@ -13,7 +13,7 @@
  * 环境变量：
  *   DISCORD_WEBHOOK_URL   必填
  *   SHAMS_POLL_MS         默认 5000
- *   SHAMS_RSS_TIMEOUT_MS  默认 3000
+ *   SHAMS_RSS_TIMEOUT_MS  默认 12000（RSSHub/海外实例可能较慢）
  *   SHAMS_BOOT_SKEW_MS    与 bootAt 比较时的容忍时间（早于此的 pubDate 视为旧文），默认 120000
  *   SHAMS_RSS_URLS        逗号或分号分隔的 RSS 列表，覆盖默认的多个 Nitter 源
  *   SHAMS_RSS_USER_AGENT  拉 RSS 的 User-Agent；不少公共实例会 403 屏蔽脚本 UA，未设置则用常见 Chrome 串
@@ -29,7 +29,7 @@ const Parser = require("rss-parser");
 dotenv.config();
 
 const POLL_MS = Math.max(5000, Number(process.env.SHAMS_POLL_MS || 5000));
-const RSS_TIMEOUT_MS = Math.max(1000, Number(process.env.SHAMS_RSS_TIMEOUT_MS || 3000));
+const RSS_TIMEOUT_MS = Math.max(2000, Number(process.env.SHAMS_RSS_TIMEOUT_MS || 12_000));
 const GAMMA_HTTP_MS = Math.max(5000, Number(process.env.SHAMS_GAMMA_HTTP_TIMEOUT_MS || 15_000));
 const BOOT_SKEW_MS = Math.max(60_000, Number(process.env.SHAMS_BOOT_SKEW_MS || 120_000));
 
@@ -58,18 +58,56 @@ if (PROXY_URL) {
   }
 }
 
+/** 公服时常失效；多源 + lastGoodRssUrl 优先。RSSHub 走 twitter/user 通常比 Nitter 更适机房 IP */
+const DEFAULT_SHAMS_RSS_CANDIDATES = [
+  "https://rsshub.app/twitter/user/ShamsCharania",
+  "https://rsshub.rssforever.com/twitter/user/ShamsCharania",
+  "https://nitter.net/ShamsCharania/rss",
+  "https://nitter.woodland.cafe/ShamsCharania/rss",
+  "https://nitter.sneed.network/ShamsCharania/rss",
+  "https://nitter.1d4.us/ShamsCharania/rss",
+  "https://nitter.riverside.rocks/ShamsCharania/rss",
+  "https://nitter.privacydev.net/ShamsCharania/rss",
+  "https://nitter.42l.fr/ShamsCharania/rss",
+  "https://nitter.foss.wtf/ShamsCharania/rss",
+  "https://nitter.cz/ShamsCharania/rss",
+  "https://nitter.moomoo.me/ShamsCharania/rss",
+  "https://nitter.ktachibana.party/ShamsCharania/rss",
+  "https://nitter.vern.cc/ShamsCharania/rss",
+];
+
 const RSS_URLS = (() => {
   const raw = String(process.env.SHAMS_RSS_URLS || "").trim();
   if (raw) {
     const list = raw.split(/[,;]/g).map((s) => s.trim()).filter(Boolean);
     if (list.length) return list;
   }
-  return [
-    "https://nitter.net/ShamsCharania/rss",
-    "https://nitter.catsarch.com/ShamsCharania/rss",
-    "https://nitter.tiekoetter.com/ShamsCharania/rss",
-  ];
+  return [...new Set(DEFAULT_SHAMS_RSS_CANDIDATES)];
 })();
+
+function buildRssTryOrder(state) {
+  const last = String(state?.lastGoodRssUrl || "").trim();
+  if (!last) return [...RSS_URLS];
+  return [last, ...RSS_URLS.filter((u) => u !== last)];
+}
+
+/** 防 Anubis/CF 的 HTML 被当成 feed */
+function looksLikeRssOrAtomXml(s) {
+  if (typeof s !== "string" || s.length < 40) return false;
+  const t = s.trim().slice(0, 8000);
+  if (
+    /not a bot|are you a bot|anubis|challenges?\.cloudflare|Just a moment|__cf_chl|Checking your browser/i.test(
+      t,
+    )
+  ) {
+    return false;
+  }
+  if (t.startsWith("<?xml")) return true;
+  if (/<\s*rss[\s>]/i.test(t)) return true;
+  if (/<\s*feed[\s>]/i.test(t)) return true;
+  if (/<\s*rdf:RDF/i.test(t)) return true;
+  return false;
+}
 
 const ABBR_ALIAS = { SA: "SAS", GS: "GSW", NO: "NOP" };
 const ABBR_TO_SLUG = { GSW: "gs", NOP: "no", SAS: "sa", WAS: "wsh" };
@@ -395,23 +433,25 @@ function pickEventForTeams(events, abbrs) {
   return null;
 }
 
-async function fetchRssXml() {
-  for (const url of RSS_URLS) {
+async function fetchRssXml(state) {
+  const urls = buildRssTryOrder(state);
+  for (const url of urls) {
     try {
-      const { data, status } = await axios.get(url, {
+      const { data } = await axios.get(url, {
         timeout: RSS_TIMEOUT_MS,
         responseType: "text",
         validateStatus: (s) => s >= 200 && s < 300,
         headers: {
-          Accept: "application/rss+xml, application/xml, text/xml, */*;q=0.9",
+          Accept: "application/rss+xml, application/xml, text/xml, */*;q=0.9, text/html;q=0.3",
           "Accept-Language": "en-US,en;q=0.9",
           "User-Agent": RSS_USER_AGENT,
         },
         transitional: { forcedJSONParsing: false },
       });
-      if (typeof data === "string" && data.length > 20) {
+      if (typeof data === "string" && looksLikeRssOrAtomXml(data)) {
         return { xml: data, from: url };
       }
+      console.warn(`[shams-injury] skip (not valid rss/atom or bot page): ${url}`);
     } catch (e) {
       console.warn(`[shams-injury] rss fail ${url}:`, e?.message || e);
     }
@@ -430,9 +470,11 @@ function loadState() {
       coldDone = true;
       if (bootAt == null) bootAt = Date.now();
     }
-    return { seen, coldDone, bootAt };
+    const lastGoodRssUrl =
+      typeof p?.lastGoodRssUrl === "string" && p.lastGoodRssUrl.trim() ? p.lastGoodRssUrl.trim() : null;
+    return { seen, coldDone, bootAt, lastGoodRssUrl };
   } catch {
-    return { seen: new Set(), coldDone: false, bootAt: null };
+    return { seen: new Set(), coldDone: false, bootAt: null, lastGoodRssUrl: null };
   }
 }
 
@@ -446,6 +488,7 @@ function saveState(state) {
         seen: [...state.seen].slice(-3000),
         coldDone: state.coldDone,
         bootAt: state.bootAt,
+        lastGoodRssUrl: state.lastGoodRssUrl,
       },
       null,
       2,
@@ -494,11 +537,12 @@ async function processLoop() {
     console.warn("[shams-injury] no nba events from gamma");
   }
 
-  const fetched = await fetchRssXml();
+  const fetched = await fetchRssXml(state);
   if (!fetched) {
     console.warn("[shams-injury] all rss failed");
     return;
   }
+  state.lastGoodRssUrl = fetched.from;
   const feed = await rssParser.parseString(fetched.xml);
   const items = (feed.items || []).slice(0, 30);
 
@@ -548,7 +592,7 @@ async function processLoop() {
     if (!ev) {
       const teamLine = abbrs.map((a) => `${a}（${TEAM_FULL[a] || a}）`).join(" / ");
       const body = [
-        "🚨 **NBA 伤病速报（Shams / Nitter）**",
+        "🚨 **NBA 伤病速报（Shams / RSS）**",
         "",
         `**内容：**`,
         String(item.title || "").slice(0, 400),
@@ -606,7 +650,9 @@ async function processLoop() {
 }
 
 async function main() {
-  console.log(`[shams-injury] started, poll=${POLL_MS}ms rssTimeout=${RSS_TIMEOUT_MS}ms`);
+  console.log(
+    `[shams-injury] started, poll=${POLL_MS}ms rssTimeout=${RSS_TIMEOUT_MS}ms rssCandidates=${RSS_URLS.length}`,
+  );
   for (;;) {
     const t0 = Date.now();
     try {
