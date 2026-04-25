@@ -17,9 +17,14 @@
  *   SHAMS_BOOT_SKEW_MS    与 bootAt 比较时的容忍时间（早于此的 pubDate 视为旧文），默认 120000
  *   SHAMS_RSS_URLS        逗号或分号分隔的 RSS 列表，覆盖下方默认
  *   SHAMS_RSS_VERBOSE=1  则每次请求失败时打印更完整错误（默认可读一行摘要）
- *   SHAMS_RSS_USER_AGENT  拉 RSS 的 User-Agent；不少公共实例会 403 屏蔽脚本 UA，未设置则用常见 Chrome 串
+ *   SHAMS_RSS_USER_AGENT  仅覆盖 User-Agent 串；未设时整套请求会尽量像 Chrome 导航（见 browserLikeRssGetHeaders）
+ *   SHAMS_MINIMAL_RSS_HEADERS=1  仅发 Accept + UA + Lang（关闭「浏览器全量头」试验）
  *   SHAMS_STATE_PATH      默认 ./data/shams-injury-daemon-state.json
  *   PREDICT_PROXY / NBA_RISK_PROXY / HTTPS_PROXY  可选，与 nba-official-risk-daemon 一致
+ *   SHAMS_INCLUDE_GOOGLE_NEWS=1  在默认源最前追加 Google News RSS（索引常晚于发帖数分钟～十余分钟，不适合「约 1 分钟内」需求，仅作兜底）
+ *
+ * 延迟说明：若希望「发帖后约 1 分钟内」提醒，请保持 SHAMS_POLL_MS 在 5000～15000，且 feed 须为 X 时间线镜像（Nitter/自架 RSSHub 等）。
+ * Google 新闻聚合不适合该时效；公网 EC2 若全被 Nitter 拦截，需换网络/代理/自架，而非把轮询改成 1 分钟一次（那只会更慢）。
  */
 const fs = require("fs");
 const path = require("path");
@@ -30,6 +35,11 @@ const Parser = require("rss-parser");
 dotenv.config();
 
 const POLL_MS = Math.max(5000, Number(process.env.SHAMS_POLL_MS || 5000));
+if (POLL_MS > 30_000) {
+  console.warn(
+    `[shams-injury] SHAMS_POLL_MS=${POLL_MS} 较大，发现新帖可能远晚于「约 1 分钟」；建议 5000～15000`,
+  );
+}
 const RSS_TIMEOUT_MS = Math.max(2000, Number(process.env.SHAMS_RSS_TIMEOUT_MS || 12_000));
 const GAMMA_HTTP_MS = Math.max(5000, Number(process.env.SHAMS_GAMMA_HTTP_TIMEOUT_MS || 15_000));
 const BOOT_SKEW_MS = Math.max(60_000, Number(process.env.SHAMS_BOOT_SKEW_MS || 120_000));
@@ -59,9 +69,13 @@ if (PROXY_URL) {
   }
 }
 
+/** 见文件头「延迟说明」。默认不含 Google 新闻（索引慢，难满足约 1 分钟内）。 */
+const GOOGLE_NEWS_SHAMS_RSS =
+  "https://news.google.com/rss/search?q=Shams+Charania+(out+OR+questionable+OR+injury+OR+doubtful+OR+scratch+OR+status)+when:2d&hl=en&gl=US&ceid=US:en";
+
 /**
- * 先尝试 RSSHub /twitter/user（有用户反馈在部分网络比 Nitter 稳，但公网实例仍可能 404/503/需自架 token，按失败顺序回退 Nitter。
- * 列表亦参考 https://github.com/zedeus/nitter/wiki/Instances
+ * RSSHub / Nitter：能通则接近 X 时间线；公服常 404/403/反爬。
+ * 列表参考 https://github.com/zedeus/nitter/wiki/Instances
  */
 const DEFAULT_SHAMS_RSS_CANDIDATES = [
   "https://rsshub.app/twitter/user/ShamsCharania",
@@ -85,13 +99,59 @@ const RSS_URLS = (() => {
     const list = raw.split(/[,;]/g).map((s) => s.trim()).filter(Boolean);
     if (list.length) return list;
   }
-  return [...new Set(DEFAULT_SHAMS_RSS_CANDIDATES)];
+  const base = [...new Set(DEFAULT_SHAMS_RSS_CANDIDATES)];
+  if (String(process.env.SHAMS_INCLUDE_GOOGLE_NEWS || "").trim() === "1") {
+    return [GOOGLE_NEWS_SHAMS_RSS, ...base];
+  }
+  return base;
 })();
 
 function buildRssTryOrder(state) {
   const last = String(state?.lastGoodRssUrl || "").trim();
   if (!last) return [...RSS_URLS];
   return [last, ...RSS_URLS.filter((u) => u !== last)];
+}
+
+/**
+ * 尽量模仿 Chrome 地址栏直开 XML/RSS 的请求头（WAF 弱时可能略好）。
+ * 已含 Chrome UA 时仍建议保留 Sec-Ch-Ua/Sec-Fetch/Referer 等与真实浏览器一致。
+ * Anubis/Cloudflare JS 挑战、TLS/设备指纹 无法靠纯 HTTP 头解决。
+ */
+function browserLikeRssGetHeaders(targetUrl) {
+  if (String(process.env.SHAMS_MINIMAL_RSS_HEADERS || "").trim() === "1") {
+    return {
+      Accept: "application/rss+xml, application/xml, text/xml, */*;q=0.9",
+      "Accept-Language": "en-US,en;q=0.9",
+      "User-Agent": RSS_USER_AGENT,
+    };
+  }
+  let origin = "https://nitter.net";
+  try {
+    const u = new URL(targetUrl);
+    origin = u.origin;
+  } catch {
+    // ignore
+  }
+  const h = {
+    Accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,application/rss+xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "User-Agent": RSS_USER_AGENT,
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    Referer: `${origin}/`,
+  };
+  /** 仅当 UA 像 Chrome/Edge(Chromium) 时带 Sec-Ch-Ua，避免与自定义 UA 矛盾 */
+  if (/\bChrome\//.test(RSS_USER_AGENT) || /\bEdg\//.test(RSS_USER_AGENT)) {
+    h["Sec-Ch-Ua"] = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"';
+    h["Sec-Ch-Ua-Mobile"] = "?0";
+    h["Sec-Ch-Ua-Platform"] = '"Windows"';
+  }
+  return h;
 }
 
 /** 防 Anubis/CF 的 HTML 被当成 feed */
@@ -445,11 +505,7 @@ async function fetchRssXml(state) {
         maxRedirects: 12,
         responseType: "text",
         validateStatus: (s) => s >= 200 && s < 300,
-        headers: {
-          Accept: "application/rss+xml, application/xml, text/xml, */*;q=0.9, text/html;q=0.3",
-          "Accept-Language": "en-US,en;q=0.9",
-          "User-Agent": RSS_USER_AGENT,
-        },
+        headers: browserLikeRssGetHeaders(url),
         transitional: { forcedJSONParsing: false },
       });
       if (typeof data === "string" && looksLikeRssOrAtomXml(data)) {
