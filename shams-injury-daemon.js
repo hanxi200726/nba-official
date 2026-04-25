@@ -60,11 +60,12 @@ if (PROXY_URL) {
 }
 
 /**
- * 默认只拉 Nitter 系 RSS（/user/rss）。公网 RSSHub 的 /twitter/user 多数实例需自配 X token，公服易 404/503，故不预置。
- * 列表参考 https://github.com/zedeus/nitter/wiki/Instances ；twiiit.com 等部分入口已上 Anubis，脚本无法过 PoW，故不预置。
- * 机房 IP 可能仍全灭 → 见 processLoop 里 all rss failed 的说明；最终靠 SHAMS_RSS_URLS 或代理。
+ * 先尝试 RSSHub /twitter/user（有用户反馈在部分网络比 Nitter 稳，但公网实例仍可能 404/503/需自架 token，按失败顺序回退 Nitter。
+ * 列表亦参考 https://github.com/zedeus/nitter/wiki/Instances
  */
 const DEFAULT_SHAMS_RSS_CANDIDATES = [
+  "https://rsshub.app/twitter/user/ShamsCharania",
+  "https://rsshub.rssforever.com/twitter/user/ShamsCharania",
   "https://xcancel.com/ShamsCharania/rss",
   "https://nitter.net/ShamsCharania/rss",
   "https://nitter.privacyredirect.com/ShamsCharania/rss",
