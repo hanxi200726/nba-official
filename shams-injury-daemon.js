@@ -16,6 +16,7 @@
  *   SHAMS_RSS_TIMEOUT_MS  默认 3000
  *   SHAMS_BOOT_SKEW_MS    与 bootAt 比较时的容忍时间（早于此的 pubDate 视为旧文），默认 120000
  *   SHAMS_RSS_URLS        逗号或分号分隔的 RSS 列表，覆盖默认的多个 Nitter 源
+ *   SHAMS_RSS_USER_AGENT  拉 RSS 的 User-Agent；不少公共实例会 403 屏蔽脚本 UA，未设置则用常见 Chrome 串
  *   SHAMS_STATE_PATH      默认 ./data/shams-injury-daemon-state.json
  *   PREDICT_PROXY / NBA_RISK_PROXY / HTTPS_PROXY  可选，与 nba-official-risk-daemon 一致
  */
@@ -31,6 +32,11 @@ const POLL_MS = Math.max(5000, Number(process.env.SHAMS_POLL_MS || 5000));
 const RSS_TIMEOUT_MS = Math.max(1000, Number(process.env.SHAMS_RSS_TIMEOUT_MS || 3000));
 const GAMMA_HTTP_MS = Math.max(5000, Number(process.env.SHAMS_GAMMA_HTTP_TIMEOUT_MS || 15_000));
 const BOOT_SKEW_MS = Math.max(60_000, Number(process.env.SHAMS_BOOT_SKEW_MS || 120_000));
+
+/** 与浏览器一致，减少 Nitter/反爬 返回 403（勿再用「脚本名」作 UA） */
+const DEFAULT_RSS_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const RSS_USER_AGENT = String(process.env.SHAMS_RSS_USER_AGENT || DEFAULT_RSS_UA).trim() || DEFAULT_RSS_UA;
 
 const DISCORD_WEBHOOK_URL = String(process.env.DISCORD_WEBHOOK_URL || "").trim();
 const STATE_PATH = path.resolve(process.env.SHAMS_STATE_PATH || path.join(__dirname, "data", "shams-injury-daemon-state.json"));
@@ -396,7 +402,11 @@ async function fetchRssXml() {
         timeout: RSS_TIMEOUT_MS,
         responseType: "text",
         validateStatus: (s) => s >= 200 && s < 300,
-        headers: { Accept: "application/rss+xml, application/xml, text/xml, */*", "User-Agent": "shams-injury-daemon/1" },
+        headers: {
+          Accept: "application/rss+xml, application/xml, text/xml, */*;q=0.9",
+          "Accept-Language": "en-US,en;q=0.9",
+          "User-Agent": RSS_USER_AGENT,
+        },
         transitional: { forcedJSONParsing: false },
       });
       if (typeof data === "string" && data.length > 20) {
