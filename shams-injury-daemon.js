@@ -15,7 +15,8 @@
  *   SHAMS_POLL_MS         默认 5000
  *   SHAMS_RSS_TIMEOUT_MS  默认 12000（RSSHub/海外实例可能较慢）
  *   SHAMS_BOOT_SKEW_MS    与 bootAt 比较时的容忍时间（早于此的 pubDate 视为旧文），默认 120000
- *   SHAMS_RSS_URLS        逗号或分号分隔的 RSS 列表，覆盖默认的多个 Nitter 源
+ *   SHAMS_RSS_URLS        逗号或分号分隔的 RSS 列表，覆盖下方默认
+ *   SHAMS_RSS_VERBOSE=1  则每次请求失败时打印更完整错误（默认可读一行摘要）
  *   SHAMS_RSS_USER_AGENT  拉 RSS 的 User-Agent；不少公共实例会 403 屏蔽脚本 UA，未设置则用常见 Chrome 串
  *   SHAMS_STATE_PATH      默认 ./data/shams-injury-daemon-state.json
  *   PREDICT_PROXY / NBA_RISK_PROXY / HTTPS_PROXY  可选，与 nba-official-risk-daemon 一致
@@ -58,22 +59,23 @@ if (PROXY_URL) {
   }
 }
 
-/** 公服时常失效；多源 + lastGoodRssUrl 优先。RSSHub 走 twitter/user 通常比 Nitter 更适机房 IP */
+/**
+ * 默认只拉 Nitter 系 RSS（/user/rss）。公网 RSSHub 的 /twitter/user 多数实例需自配 X token，公服易 404/503，故不预置。
+ * 列表参考 https://github.com/zedeus/nitter/wiki/Instances ；twiiit.com 等部分入口已上 Anubis，脚本无法过 PoW，故不预置。
+ * 机房 IP 可能仍全灭 → 见 processLoop 里 all rss failed 的说明；最终靠 SHAMS_RSS_URLS 或代理。
+ */
 const DEFAULT_SHAMS_RSS_CANDIDATES = [
-  "https://rsshub.app/twitter/user/ShamsCharania",
-  "https://rsshub.rssforever.com/twitter/user/ShamsCharania",
+  "https://xcancel.com/ShamsCharania/rss",
   "https://nitter.net/ShamsCharania/rss",
-  "https://nitter.woodland.cafe/ShamsCharania/rss",
-  "https://nitter.sneed.network/ShamsCharania/rss",
-  "https://nitter.1d4.us/ShamsCharania/rss",
-  "https://nitter.riverside.rocks/ShamsCharania/rss",
-  "https://nitter.privacydev.net/ShamsCharania/rss",
-  "https://nitter.42l.fr/ShamsCharania/rss",
-  "https://nitter.foss.wtf/ShamsCharania/rss",
-  "https://nitter.cz/ShamsCharania/rss",
-  "https://nitter.moomoo.me/ShamsCharania/rss",
-  "https://nitter.ktachibana.party/ShamsCharania/rss",
-  "https://nitter.vern.cc/ShamsCharania/rss",
+  "https://nitter.privacyredirect.com/ShamsCharania/rss",
+  "https://nitter.kareem.one/ShamsCharania/rss",
+  "https://nitter.space/ShamsCharania/rss",
+  "https://nitter.tiekoetter.com/ShamsCharania/rss",
+  "https://nitter.catsarch.com/ShamsCharania/rss",
+  "https://nitter.poast.org/ShamsCharania/rss",
+  "https://nitter.us.catsarch.com/ShamsCharania/rss",
+  "https://nuku.trabun.org/ShamsCharania/rss",
+  "https://lightbrd.com/ShamsCharania/rss",
 ];
 
 const RSS_URLS = (() => {
@@ -439,6 +441,7 @@ async function fetchRssXml(state) {
     try {
       const { data } = await axios.get(url, {
         timeout: RSS_TIMEOUT_MS,
+        maxRedirects: 12,
         responseType: "text",
         validateStatus: (s) => s >= 200 && s < 300,
         headers: {
@@ -451,12 +454,22 @@ async function fetchRssXml(state) {
       if (typeof data === "string" && looksLikeRssOrAtomXml(data)) {
         return { xml: data, from: url };
       }
-      console.warn(`[shams-injury] skip (not valid rss/atom or bot page): ${url}`);
+      rssLogMaybeVerbose(url, "not valid xml or bot interstitial (HTTP ok)");
     } catch (e) {
-      console.warn(`[shams-injury] rss fail ${url}:`, e?.message || e);
+      const short = e?.response?.status != null ? `HTTP ${e.response.status}` : e?.code || e?.message || String(e);
+      rssLogMaybeVerbose(url, short, e);
     }
   }
   return null;
+}
+
+function rssLogMaybeVerbose(url, short, errObj) {
+  if (String(process.env.SHAMS_RSS_VERBOSE || "").trim() === "1") {
+    if (errObj) console.warn(`[shams-injury] rss fail ${url}:`, short, errObj);
+    else console.warn(`[shams-injury] rss fail ${url}:`, short);
+  } else {
+    console.warn(`[shams-injury] rss fail ${url} → ${short}`);
+  }
 }
 
 function loadState() {
@@ -539,7 +552,9 @@ async function processLoop() {
 
   const fetched = await fetchRssXml(state);
   if (!fetched) {
-    console.warn("[shams-injury] all rss failed");
+    console.warn(
+      "[shams-injury] all rss failed — 公网无保障。在 VPS: curl 测 /ShamsCharania/rss；换实例: https://github.com/zedeus/nitter/wiki/Instances 与 https://status.d420.de ；可设 SHAMS_RSS_URLS=唯一可用地址 或 PREDICT_PROXY/HTTPS_PROXY。",
+    );
     return;
   }
   state.lastGoodRssUrl = fetched.from;
