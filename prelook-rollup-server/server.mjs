@@ -5,11 +5,30 @@ import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const PREDICT_API_BASE = process.env.PREDICT_API_BASE || "https://api.predict.fun";
-const PREDICT_API_KEY = (process.env.PREDICT_API_KEY || "").trim();
+/** fetch 的 HTTP 头必须是 ASCII；从聊天/文档复制 Key 时易混入 BOM、全角或中文，会触发 undici ByteString 报错 */
+function envValueMustBeAsciiHeaderSafe(name, raw) {
+  const s = String(raw ?? "")
+    .replace(/^\uFEFF/, "")
+    .trim();
+  if (!s) return s;
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c > 127) {
+      console.error(
+        `[prelook-rollup] 环境变量 ${name} 在第 ${i + 1} 个字符处含有非 ASCII（Unicode ${c}），无法用于 HTTP 头。请改用纯英文数字的 Key（勿含中文、全角符号）；可从 Predict 控制台重新复制。`,
+      );
+      process.exit(1);
+    }
+  }
+  return s;
+}
+
+const PREDICT_API_BASE_RAW = (process.env.PREDICT_API_BASE || "https://api.predict.fun").replace(/^\uFEFF/, "").trim();
+const PREDICT_API_BASE = envValueMustBeAsciiHeaderSafe("PREDICT_API_BASE", PREDICT_API_BASE_RAW) || "https://api.predict.fun";
+const PREDICT_API_KEY = envValueMustBeAsciiHeaderSafe("PREDICT_API_KEY", process.env.PREDICT_API_KEY);
 const PORT = Number(process.env.PRELOOK_ROLLUP_PORT || 4077);
 const DATA_PATH = process.env.PRELOOK_ROLLUP_DATA || path.join(__dirname, "data", "prelook_rollup.json");
-const SERVE_KEY = (process.env.PRELOOK_ROLLUP_SERVE_KEY || "").trim();
+const SERVE_KEY = envValueMustBeAsciiHeaderSafe("PRELOOK_ROLLUP_SERVE_KEY", process.env.PRELOOK_ROLLUP_SERVE_KEY);
 const TICK_MS = Math.max(15_000, Number(process.env.PRELOOK_ROLLUP_TICK_MS || 60_000));
 const BOOTSTRAP = String(process.env.PRELOOK_ROLLUP_BOOTSTRAP || "").trim() === "1";
 

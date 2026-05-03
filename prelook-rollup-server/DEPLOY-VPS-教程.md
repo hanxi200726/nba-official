@@ -32,6 +32,36 @@ ls
 - **私有仓库**：先在服务器上配置 SSH Key 或使用带 token 的 HTTPS，否则 `git clone` 会失败。
 - **没有 Git**：Ubuntu 上可执行：`sudo apt update && sudo apt install -y git`。
 
+**常见错误（你截图里的情况）**：
+
+1. **`git clone .../nba-official/prelook-rollup-server/` → `Not Found`**  
+   Git **不能**用「仓库 URL + 子目录」当仓库地址。`clone` 的永远是**整个仓库的根**，没有「只克隆子文件夹」这种官方写法。  
+   - 错：`https://github.com/用户/nba-official/prelook-rollup-server`  
+   - 对：若 rollup 在独立仓库里，应是 `https://github.com/hanxi200726/prelook-rollup-server.git`（仅示例，以你 GitHub 上绿色 **Code** 按钮为准）。
+
+2. **`nba-official` 与 `prelook-rollup-server` 是不同仓库**  
+   你以前在 VPS 上 clone 过 **`nba-official`**，里面**没有** `prelook-rollup-server` 子目录，所以 `cd nba-official/prelook-rollup-server` 会提示 **No such file**。  
+   需要 **再 clone** rollup 专用仓库，或删掉旧目录后按你希望的方式整理（见下条）。
+
+3. **`fatal: destination path 'xxx' already exists`**  
+   当前目录下已有同名文件夹且非空。可选做法：  
+   - `cd ~ && git clone https://github.com/用户/仓库名.git 新目录名`（换一个名字），或  
+   - 进入已有目录执行 `git pull`（若那就是同一个仓库），或  
+   - 确认无用后 `rm -rf nba-official` 再重新 clone（**慎用**，先备份）。
+
+4. **仓库根目录多套了一层同名文件夹**  
+   若 GitHub 上结构是：`prelook-rollup-server`（仓库名）→ 里面又有一个文件夹 **`prelook-rollup-server/`** → 才是 `server.mjs`，则 VPS 上要：  
+   ```bash
+   cd ~/prelook-rollup-server/prelook-rollup-server
+   ls server.mjs
+   ```  
+   能在这一层看到 `server.mjs` 才是正确运行目录。
+
+5. **`Repository not found` + `Authentication failed`（HTTPS 克隆）**  
+   - 常见于 **私有仓库**：GitHub 已不再支持用「登录密码」做 HTTPS，`Password` 处应填 **Personal Access Token（PAT）**；或改用 **SSH**：`git@github.com:用户/仓库.git`，并把 VPS 上 `~/.ssh/id_ed25519.pub` 加到 GitHub → SSH keys。  
+   - 无权限时 GitHub 也可能只返回 `not found`。在浏览器打开仓库页确认 URL、是否私有。  
+   - 不想配 Git 时，用教程 **方式 B** 从本机 `scp` 上传即可。
+
 ### 方式 B：只拷贝 `prelook-rollup-server` 文件夹（在你自己的电脑上操作）
 
 在你 **Windows** 上打开 PowerShell（把 `你的VPS公网IP` 换成真实 IP；若用密钥登录，需加 `-i` 指定私钥）：
@@ -210,11 +240,16 @@ Worker 侧 `PRELOOK_ROLLUP_UPSTREAM` 建议使用 **`https://rollup.你的域名
 
 | 现象 | 可能原因 |
 |------|----------|
-| `cd .../prelook-rollup-server: No such file` | 你克隆/上传的是别的仓库或路径错了；用 `find ~ -name server.mjs 2>/dev/null` 找文件位置。 |
+| `remote: Not Found` + 带子路径的 clone URL | URL 写成了 `用户/仓库名/子目录`，GitHub 不认。只 clone **仓库根**，用 Code 里给的 `https://github.com/用户/仓库.git`。 |
+| `cd nba-official/prelook-rollup-server` 不存在 | `nba-official` 仓库里没有该子目录；应 clone **prelook-rollup-server** 独立仓库，或进入你实际放 `server.mjs` 的路径。 |
+| `destination path already exists` | 同名目录已存在；换目录名、`git pull`，或删除旧目录后再 clone（注意备份）。 |
+| `cd .../prelook-rollup-server: No such file` | 路径不对或未克隆到该仓库；`find ~ -name server.mjs 2>/dev/null` 查找。 |
+| `Repository not found` / `Authentication failed` | 多为**私有库**或未配置 PAT/SSH；HTTPS 密码处填 **PAT**，或 `git clone git@github.com:...`；也可改用 `scp` 上传。 |
 | `missing PREDICT_API_KEY` | 未 export 或未在 PM2 ecosystem 里写环境变量。 |
 | Worker 401 / VPS 无数据 | `x-prelook-rollup-key` 与 `PRELOOK_ROLLUP_SERVE_KEY` / `PRELOOK_ROLLUP_UPSTREAM_KEY` 不一致。 |
 | 启动后只有近 1h 量级 | 未开 bootstrap 且刚启动：等多轮轮询，或**一次性**设 `PRELOOK_ROLLUP_BOOTSTRAP=1` 重启。 |
 | 磁盘文件越来越大 | 正常；状态文件含近 24h 聚合；注意磁盘与备份策略。 |
+| `ByteString` / `character ... greater than 255` / `undici` 报错 | 多为 **`PREDICT_API_KEY`（或误设的 `PREDICT_API_BASE`）里混入了非 ASCII**（全角、中文、不可见字符）。请从 Predict 控制台**重新复制纯 UUID**，检查 PM2 `ecosystem` / `export` 中无中文；拉取最新 `server.mjs` 后会在启动时直接提示是哪项环境变量有问题。 |
 
 ---
 
